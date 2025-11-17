@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-MAKE ENGLISH NOT MUSIC — Harsh Noise Web Version (no fluidsynth/ffmpeg)
-- Pure Python + NumPy audio synthesis.
-- Text -> bits -> D-beat–like pattern driving noise-based kick/snare/hat/crash.
-- Audio is generated as mono 16-bit WAV in-memory and played via <audio> in browser.
-"""
-
 import os
 import mimetypes
 import base64
@@ -17,24 +7,20 @@ import wave
 import numpy as np
 from flask import Flask, request, render_template_string, send_file, abort
 
-# ------------ Config ------------
-
 APP_TITLE = "MAKE ENGLISH NOT MUSIC (NOISE WEB)"
-BPM = 300
-SUBDIV = 16                # 16th-note grid
+BPM = 190
+SUBDIV = 8
 ADD_DBEAT_INTRO = True
 ADD_DBEAT_OUTRO = True
 ALT_KICK_SNARE = True
-GHOST_HAT_ON_REST = True   # 为噪音风格，rest 也打一丢丢高频噪声
+GHOST_HAT_ON_REST = True
 
-SR = 44100                 # sample rate
+SR = 44100
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 背景图片候选
 BG_CANDIDATES = [
-    "background.png", "background.jpg", "background.jpeg",
-    "background.gif", "background.bmp", "background.webp",
+    "background.png",
     "未标题-16.png"
 ]
 BG_PATH = None
@@ -46,59 +32,52 @@ for name in BG_CANDIDATES:
 
 app = Flask(__name__)
 
-# ------------ Bit logic ------------
-
 def text_to_bits(s: str) -> str:
     data = s.encode("ascii", "ignore")
     return "".join(f"{b:08b}" for b in data)
 
-# ------------ Harsh Noise Drum Synth ------------
-
 def make_kick(sr: int, dur: float) -> np.ndarray:
-    """Harsh, distorted low kick."""
     t = np.linspace(0, dur, int(sr * dur), endpoint=False)
-    # Pitch sweep: high to low
-    f0, f1 = 140.0, 40.0
-    sweep = f0 * np.exp(-6 * t) + f1
+    base = 70.0
+    sweep = base * (1.0 + 4.0 * np.exp(-10.0 * t))
     phase = 2 * np.pi * np.cumsum(sweep) / sr
     tone = np.sin(phase)
-    env = np.exp(-8 * t)
-    noise = np.random.randn(len(t)) * 0.35
-    x = tone * env * 1.2 + noise * env * 0.7
-    return np.tanh(4.0 * x).astype(np.float32)
+    env = np.exp(-12.0 * t)
+    click_len = max(1, int(0.003 * sr))
+    click = np.zeros_like(t)
+    click[:click_len] = np.linspace(1.0, 0.0, click_len)
+    noise = np.random.randn(len(t)) * 0.2
+    x = tone * env * 1.4 + noise * env * 0.6 + click * 0.8
+    return np.tanh(6.0 * x).astype(np.float32)
 
 def make_snare(sr: int, dur: float) -> np.ndarray:
-    """Noisy snare: broadband noise with fast decay."""
     t = np.linspace(0, dur, int(sr * dur), endpoint=False)
     noise = np.random.randn(len(t))
-    env = np.exp(-18 * t)
-    # slight band emphasis (~2k–4k)
-    band = np.convolve(noise, np.array([1, -1, 1, -1]), mode="same")
-    x = (noise * 0.4 + band * 0.6) * env
-    return np.tanh(3.5 * x).astype(np.float32)
+    env = np.exp(-18.0 * t)
+    crack = np.sin(2 * np.pi * 190.0 * t) + 0.5 * np.sin(2 * np.pi * 380.0 * t)
+    band = np.convolve(noise, np.array([1.0, -2.0, 3.0, -2.0, 1.0]), mode="same")
+    x = (noise * 0.5 + band * 0.8 + crack * 0.7) * env
+    return np.tanh(4.0 * x).astype(np.float32)
 
 def make_hat(sr: int, dur: float, soft: bool = False) -> np.ndarray:
-    """High-frequency metallic-ish hat."""
     t = np.linspace(0, dur, int(sr * dur), endpoint=False)
     noise = np.random.randn(len(t))
-    # crude high-pass: diff
-    hp = np.convolve(noise, np.array([1, -1]), mode="same")
-    env = np.exp(-45 * t)
-    amp = 0.25 if soft else 0.4
-    x = hp * env * amp
-    return np.tanh(3.0 * x).astype(np.float32)
+    hp = np.convolve(noise, np.array([1.0, -0.6, -0.4]), mode="same")
+    env = np.exp(-55.0 * t)
+    base_amp = 0.18 if soft else 0.32
+    jitter = 0.8 + 0.4 * np.random.rand()
+    x = hp * env * base_amp * jitter
+    return np.tanh(3.5 * x).astype(np.float32)
 
 def make_crash(sr: int, dur: float) -> np.ndarray:
-    """Longer noisy crash / wash."""
     t = np.linspace(0, dur, int(sr * dur), endpoint=False)
     noise = np.random.randn(len(t))
     env = np.exp(-2.5 * t)
-    band = np.convolve(noise, np.array([1, -1, 1, -1, 1, -1]), mode="same")
+    band = np.convolve(noise, np.array([1.0, -1.0, 1.0, -1.0, 1.0, -1.0]), mode="same")
     x = (noise * 0.3 + band * 0.7) * env
     return np.tanh(3.0 * x).astype(np.float32)
 
 def add_hit(buf: np.ndarray, start_idx: int, hit: np.ndarray):
-    """Add one hit waveform into main buffer with simple mix."""
     if start_idx >= len(buf):
         return
     end_idx = min(len(buf), start_idx + len(hit))
@@ -108,75 +87,93 @@ def add_hit(buf: np.ndarray, start_idx: int, hit: np.ndarray):
     buf[start_idx:end_idx] += hit[:length]
 
 def text_to_noise_wav(text: str):
-    """Text -> bitstring -> harsh noise D-beat pattern -> mono WAV bytes."""
-
     bits = text_to_bits(text if text else "make english not music")
 
-    # 16th-note step duration
     sec_per_quarter = 60.0 / BPM
     step_dur = sec_per_quarter / 4.0
 
-    # Rough intro/outro sizes in "steps"
-    intro_steps = 16 if ADD_DBEAT_INTRO else 0   # 1 bar of 4/4 at 16th grid
+    intro_steps = 16 if ADD_DBEAT_INTRO else 0
     outro_steps = 16 if ADD_DBEAT_OUTRO else 0
     total_steps = intro_steps + len(bits) + outro_steps
 
-    total_dur = total_steps * step_dur + 0.5  # extra tail
+    total_dur = total_steps * step_dur + 0.5
     n_samples = int(total_dur * SR) + 1
     audio = np.zeros(n_samples, dtype=np.float32)
 
-    # Prebuild hits (brutal, noisy)
     hit_dur = step_dur * 0.9
     kick = make_kick(SR, hit_dur)
     snare = make_snare(SR, hit_dur)
     hat = make_hat(SR, hit_dur, soft=False)
     hat_ghost = make_hat(SR, hit_dur * 0.6, soft=True)
     crash = make_crash(SR, step_dur * 8.0)
+    open_hat = make_hat(SR, hit_dur * 1.2, soft=False)
 
     step_samples = int(step_dur * SR)
 
-    # --- Intro: simple D-beat-ish bar ---
     pos = 0
     if ADD_DBEAT_INTRO:
         pattern = [kick, snare, kick, snare]
-        spacing = step_samples * 4  # quarter-note spacing at this BPM
+        spacing = step_samples * 4
         for h in pattern:
             add_hit(audio, pos, h)
-            add_hit(audio, pos, hat)
+            if np.random.rand() < 0.6:
+                add_hit(audio, pos, hat)
+            else:
+                add_hit(audio, pos, open_hat)
+            if np.random.rand() < 0.25:
+                add_hit(audio, pos + step_samples, snare)
             pos += spacing
 
-    # --- Main bits ---
     toggle = True
     for b in bits:
         if b == "1":
-            drum = kick if (toggle or not ALT_KICK_SNARE) else snare
-            toggle = not toggle if ALT_KICK_SNARE else toggle
+            if ALT_KICK_SNARE:
+                if toggle:
+                    drum = kick
+                else:
+                    drum = snare
+                if np.random.rand() < 0.2:
+                    drum = snare if drum is kick else kick
+                toggle = not toggle
+            else:
+                drum = kick
             add_hit(audio, pos, drum)
-            add_hit(audio, pos, hat)
+            if np.random.rand() < 0.7:
+                add_hit(audio, pos, hat)
+            else:
+                add_hit(audio, pos, open_hat)
+            if np.random.rand() < 0.18:
+                add_hit(audio, pos + step_samples // 2, snare)
+            if np.random.rand() < 0.12:
+                add_hit(audio, pos + step_samples // 4, hat_ghost)
         else:
             if GHOST_HAT_ON_REST:
-                add_hit(audio, pos, hat_ghost)
+                if np.random.rand() < 0.8:
+                    add_hit(audio, pos, hat_ghost)
+                if np.random.rand() < 0.1:
+                    add_hit(audio, pos + step_samples // 2, hat_ghost)
         pos += step_samples
 
-    # --- Outro ---
     if ADD_DBEAT_OUTRO:
         pattern = [kick, snare, kick, snare]
         spacing = step_samples * 4
         for h in pattern:
             add_hit(audio, pos, h)
-            add_hit(audio, pos, hat)
+            if np.random.rand() < 0.6:
+                add_hit(audio, pos, hat)
+            else:
+                add_hit(audio, pos, open_hat)
+            if np.random.rand() < 0.25:
+                add_hit(audio, pos + step_samples, snare)
             pos += spacing
         add_hit(audio, pos, crash)
 
-    # Normalize
     max_val = float(np.max(np.abs(audio)))
     if max_val > 1e-6:
         audio = audio / max_val * 0.95
 
-    # Convert to 16-bit PCM
     pcm = (audio * 32767.0).astype(np.int16)
 
-    # Write WAV to memory
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
@@ -185,11 +182,8 @@ def text_to_noise_wav(text: str):
         wf.writeframes(pcm.tobytes())
     wav_bytes = buf.getvalue()
 
-    # Approx duration for UI
     approx_dur = len(pcm) / SR
     return wav_bytes, bits, approx_dur
-
-# ------------ HTML Templates ------------
 
 INDEX_HTML = """
 <!doctype html>
@@ -392,8 +386,6 @@ RESULT_HTML = """
 </html>
 """
 
-# ------------ Routes ------------
-
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(
@@ -429,5 +421,4 @@ def generate():
     )
 
 if __name__ == "__main__":
-    # 跟之前一样，用 5050 方便你局域网访问
     app.run(host="0.0.0.0", port=5050, debug=False)
